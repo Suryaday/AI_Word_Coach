@@ -6,7 +6,6 @@ import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import java.util.Locale
 
 /**
  * Wraps Android's [SpeechRecognizer] for pronunciation practice.
@@ -61,13 +60,17 @@ class SpeechRecognitionManager(private val context: Context) {
         recognizer = SpeechRecognizer.createSpeechRecognizer(context)
         recognizer?.setRecognitionListener(listener)
 
+        // Use whichever English variant is available on this device.
+        // Many phones (e.g. OnePlus 11 in India) only have en-GB or en-IN
+        // downloaded, NOT en-US. Using "en" (generic English) lets the system
+        // pick the best installed model. All English variants understand the
+        // same vocabulary — only accent tolerance differs slightly.
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(
                 RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
             )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US.toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-US")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en")
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             // Do NOT set EXTRA_PREFER_OFFLINE — it causes failures on OnePlus/OxygenOS.
         }
