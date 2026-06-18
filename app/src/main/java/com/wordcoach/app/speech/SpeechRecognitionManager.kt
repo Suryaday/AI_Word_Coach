@@ -2,7 +2,6 @@ package com.wordcoach.app.speech
 
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -10,11 +9,19 @@ import android.speech.SpeechRecognizer
 import java.util.Locale
 
 /**
- * Wraps Android's [SpeechRecognizer] and prefers fully on-device recognition
- * so pronunciation practice works without an internet connection.
+ * Wraps Android's [SpeechRecognizer] for pronunciation practice.
  *
- * On Android 13+ it uses the dedicated on-device recognizer when available.
- * On older versions it asks the system recognizer to prefer offline mode.
+ * IMPORTANT: We deliberately use the standard [SpeechRecognizer.createSpeechRecognizer]
+ * (NOT createOnDeviceSpeechRecognizer) because many OEMs — including OnePlus — report
+ * on-device recognition as "available" but then fail with ERROR_LANGUAGE_UNAVAILABLE
+ * when actually invoked. The standard recognizer handles offline/online fallback
+ * internally and is far more reliable across manufacturers.
+ *
+ * We also do NOT set EXTRA_PREFER_OFFLINE because on some devices (OnePlus 11,
+ * certain Samsung builds) this causes an immediate rejection rather than a graceful
+ * fallback. The system recognizer will use an offline model when one is available and
+ * fall back to online otherwise — which is fine for our use case of scoring single
+ * English words.
  */
 class SpeechRecognitionManager(private val context: Context) {
 
@@ -29,6 +36,9 @@ class SpeechRecognitionManager(private val context: Context) {
     private var recognizer: SpeechRecognizer? = null
     private var callback: Callback? = null
 
+    /** Track whether we've already retried so we don't loop forever. */
+    private var hasRetried: Boolean = false
+
     var isListening: Boolean = false
         private set
 
@@ -36,15 +46,19 @@ class SpeechRecognitionManager(private val context: Context) {
 
     fun startListening(callback: Callback) {
         this.callback = callback
+        hasRetried = false
+        doStartListening()
+    }
 
+    private fun doStartListening() {
         if (!isAvailable()) {
-            callback.onError("Speech recognition is not available on this device.")
+            callback?.onError("Speech recognition is not available on this device.")
             return
         }
 
         // Recreate each session to avoid stale state.
         recognizer?.destroy()
-        recognizer = createRecognizer()
+        recognizer = SpeechRecognizer.createSpeechRecognizer(context)
         recognizer?.setRecognitionListener(listener)
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -53,9 +67,9 @@ class SpeechRecognitionManager(private val context: Context) {
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
             )
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US.toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-US")
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            // Ask the engine to stay offline where supported.
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            // Do NOT set EXTRA_PREFER_OFFLINE — it causes failures on OnePlus/OxygenOS.
         }
 
         isListening = true
@@ -78,16 +92,6 @@ class SpeechRecognitionManager(private val context: Context) {
         callback = null
     }
 
-    private fun createRecognizer(): SpeechRecognizer {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
-        ) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
-        } else {
-            SpeechRecognizer.createSpeechRecognizer(context)
-        }
-    }
-
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
             callback?.onReadyForSpeech()
@@ -108,6 +112,15 @@ class SpeechRecognitionManager(private val context: Context) {
 
         override fun onError(error: Int) {
             isListening = false
+
+            // On some devices the first attempt fails with a language/server error
+            // but a second attempt succeeds (recognizer initialization race).
+            if (!hasRetried && isRetryableError(error)) {
+                hasRetried = true
+                doStartListening()
+                return
+            }
+
             callback?.onError(messageForError(error))
         }
 
@@ -129,6 +142,15 @@ class SpeechRecognitionManager(private val context: Context) {
         override fun onEvent(eventType: Int, params: Bundle?) {}
     }
 
+    private fun isRetryableError(error: Int): Boolean = when (error) {
+        SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
+        SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE,
+        SpeechRecognizer.ERROR_SERVER,
+        SpeechRecognizer.ERROR_NETWORK,
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> true
+        else -> false
+    }
+
     private fun messageForError(error: Int): String = when (error) {
         SpeechRecognizer.ERROR_AUDIO -> "There was a problem with the microphone."
         SpeechRecognizer.ERROR_NO_MATCH ->
@@ -141,7 +163,13 @@ class SpeechRecognitionManager(private val context: Context) {
             "Still listening, please wait a moment."
         SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
         SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
-            "Offline English speech is not installed on this device yet."
-        else -> "Something went wrong. Please try again."
+            "English speech model not found. Please open Google app → " +
+                "Settings → Voice → Offline speech recognition → download English (US)."
+        SpeechRecognizer.ERROR_SERVER ->
+            "Speech service error. Please try again."
+        SpeechRecognizer.ERROR_NETWORK,
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
+            "No network connection, but that's fine — tap the mic and try again."
+        else -> "Something went wrong (error $error). Please try again."
     }
 }
